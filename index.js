@@ -172,7 +172,8 @@ app.post("/webhook/message", async (req, res) => {
     await tg(lines.join("\n"));
 
     // ===== автоответ (1 раз на чат / 12ч) =====
-    if (shouldAutoReply(chatId)) {
+    const FORCE_REPLY = process.env.FORCE_REPLY === "1";
+    if (FORCE_REPLY || shouldAutoReply(chatId)) {
       const autoReply = [
         "Привет! Спасибо за обращение 👋",
         "Отвечу в течение 10–30 минут. Если срочно — напишите в Telegram: @your_username.",
