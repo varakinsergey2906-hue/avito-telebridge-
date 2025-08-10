@@ -101,7 +101,6 @@ app.get("/setup/register", async (req, res) => {
 // ========= основной вебхук (v3 payload) =========
 app.post("/webhook/message", async (req, res) => {
   try {
-    // если ставил секрет — проверяем заголовок; иначе оставь ENV пустым
     if (WEBHOOK_SHARED_SECRET && req.headers["x-webhook-signature"] !== WEBHOOK_SHARED_SECRET) {
       return res.status(401).send("bad signature");
     }
@@ -115,13 +114,13 @@ app.post("/webhook/message", async (req, res) => {
     const text      = v?.content?.text || "(без текста)";
     const chatId    = v?.chat_id || "";
     const chatType  = v?.chat_type || ""; // u2i / и т.п.
-    const userId    = v?.user_id || "";   // получатель
+    const userId    = v?.user_id || "";   // собеседник
     const authorId  = v?.author_id || ""; // отправитель
     const itemId    = v?.item_id || "";
     const published = v?.published_at || null;
 
     // имена в этом событии не приходят — используем понятные подписи
-    const myName    = "";            // хочешь — впиши своё имя статически
+    const myName    = "";            // можно вписать своё имя вручную
     const userName  = "Собеседник";
 
     // карточка в твоём стиле
@@ -144,7 +143,7 @@ app.post("/webhook/message", async (req, res) => {
 
     await tg(lines.join("\n"));
 
-    // ===== автоответ в чат Авито =====
+    // ===== автоответ в чат Авито (перебор путей и форматов) =====
     const autoReply = [
       "Привет! Спасибо за обращение 👋",
       "Отвечу в течение 10–30 минут. Если срочно — напишите в Telegram: @your_username.",
@@ -154,26 +153,46 @@ app.post("/webhook/message", async (req, res) => {
     if (chatId) {
       try {
         const access = await getAvitoAccessToken();
-        const payload = { chat_id: chatId, user_id: userId, message: { text: autoReply } };
-        const sendCandidates = [
-          "https://api.avito.ru/messenger/v3/messages",
-          "https://api.avito.ru/messenger/v2/messages",
-          "https://api.avito.ru/messenger/v1/messages"
+
+        // 3 возможных формата тела
+        const bodies = [
+          // v3 формат: type + message.content
+          { chat_id: chatId, user_id: userId, type: "text", message: { content: { text: autoReply } } },
+          // v2/v1 формат с message.content
+          { chat_id: chatId, user_id: userId, message: { content: { text: autoReply } } },
+          // упрощённый
+          { chat_id: chatId, user_id: userId, message: { text: autoReply } }
         ];
+
+        // возможные пути
+        const urls = [
+          "https://api.avito.ru/messenger/v3/messages",
+          "https://api.avito.ru/messenger/v3/messages/send",
+          "https://api.avito.ru/messenger/v3/chats/messages",
+          `https://api.avito.ru/messenger/v3/chats/${encodeURIComponent(chatId)}/messages`,
+          "https://api.avito.ru/messenger/v2/messages",
+          "https://api.avito.ru/messenger/v1/messages",
+          "https://api.avito.ru/messenger/messages"
+        ];
+
         let sent = false, debug = [];
-        for (const url of sendCandidates) {
-          const r = await fetch(url, {
-            method: "POST",
-            headers: {
-              "Authorization": `Bearer ${access}`,
-              "Content-Type": "application/json"
-            },
-            body: JSON.stringify(payload)
-          });
-          const t = await r.text();
-          debug.push(`${r.status} — ${url}\n${t.slice(0,200)}`);
-          if ([200,201,202,204].includes(r.status)) { sent = true; break; }
+        outer: for (const url of urls) {
+          for (const body of bodies) {
+            const r = await fetch(url, {
+              method: "POST",
+              headers: {
+                "Authorization": `Bearer ${access}`,
+                "Content-Type": "application/json"
+              },
+              body: JSON.stringify(body)
+            });
+            const t = await r.text();
+            debug.push(`${r.status} — ${url}\n${t.slice(0,200)}\nBODY=${JSON.stringify(body)}`);
+            if ([200,201,202,204].includes(r.status)) { sent = true; break outer; }
+            try { const j = JSON.parse(t); if (j && j.ok === true) { sent = true; break outer; } } catch {}
+          }
         }
+
         await tg(`↩️ Автоответ: ${sent ? "успех" : "не отправлен"}\n` + debug.join("\n\n"));
       } catch (e) {
         await tg(`❗️Ошибка автоответа: ${e.message}`);
