@@ -4,7 +4,7 @@ import fetch from "node-fetch";
 const app = express();
 app.use(express.json());
 
-// ===== ENV =====
+// ========= ENV =========
 const {
   PORT = 8080,
   TELEGRAM_BOT_TOKEN,
@@ -14,7 +14,7 @@ const {
   AVITO_CLIENT_SECRET
 } = process.env;
 
-// ===== helpers =====
+// ========= helpers =========
 async function tg(text) {
   if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
   await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
@@ -24,25 +24,25 @@ async function tg(text) {
   });
 }
 
-function tsRu(date = new Date()) {
-  const d = date;
+function tsRuFromISO(iso) {
+  const d = iso ? new Date(iso) : new Date();
   const pad = n => String(n).padStart(2, "0");
-  return `${pad(d.getDate())}.${pad(d.getMonth() + 1)} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  return `${pad(d.getDate())}.${pad(d.getMonth()+1)} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-// ===== health / ping =====
+// ========= health / ping =========
 app.get("/", (_, res) => res.send("ok"));
 
 app.get("/ping", async (req, res) => {
   try {
     await tg(String(req.query.text || "Пинг ✅"));
     res.send("sent");
-  } catch (e) {
+  } catch {
     res.status(500).send("error");
   }
 });
 
-// ===== Avito OAuth (client_credentials) =====
+// ========= Avito OAuth (client_credentials) =========
 async function getAvitoAccessToken() {
   if (!AVITO_CLIENT_ID || !AVITO_CLIENT_SECRET) throw new Error("No Avito creds");
   const body = new URLSearchParams({
@@ -57,19 +57,19 @@ async function getAvitoAccessToken() {
   return j.access_token;
 }
 
-// ===== регистрация вебхука «кнопкой» =====
+// ========= регистрация вебхука кнопкой =========
 app.get("/setup/register", async (req, res) => {
   try {
     const access = await getAvitoAccessToken();
     const webhookUrl = `https://${req.headers.host}/webhook/message`;
+
     const candidates = [
       "https://api.avito.ru/messenger/v3/webhook",
       "https://api.avito.ru/messenger/v2/webhook",
       "https://api.avito.ru/messenger/v1/webhooks",
-      "https://api.avito.ru/messenger/v1/webhook",
-      "https://api.avito.ru/messenger/webhook",
-      "https://api.avito.ru/notifications/v1/webhook"
+      "https://api.avito.ru/messenger/v1/webhook"
     ];
+
     const results = [];
     for (const url of candidates) {
       try {
@@ -88,6 +88,7 @@ app.get("/setup/register", async (req, res) => {
         results.push({ url, status: "ERR", text: e.message });
       }
     }
+
     const summary = results.map(x => `${x.status} — ${x.url}\n${(x.text||"").slice(0,200)}`).join("\n\n");
     await tg(`⚙️ Регистрация вебхука:\n${summary}`);
     res.status(200).send(`Готово. Смотри Telegram.\n\n${summary}`);
@@ -97,84 +98,63 @@ app.get("/setup/register", async (req, res) => {
   }
 });
 
-// ===== основной вебхук =====
+// ========= основной вебхук (v3 payload) =========
 app.post("/webhook/message", async (req, res) => {
   try {
-    // если включал секрет — проверь заголовок (иначе оставь ENV пустым)
+    // если ставил секрет — проверяем заголовок; иначе оставь ENV пустым
     if (WEBHOOK_SHARED_SECRET && req.headers["x-webhook-signature"] !== WEBHOOK_SHARED_SECRET) {
       return res.status(401).send("bad signature");
     }
 
     const ev = req.body || {};
-
-    // отладка: пришлём сырые данные (обрежем до 3500 символов)
+    // пришлём RAW для отладки (обрезка)
     try { await tg("📦 RAW:\n" + JSON.stringify(ev, null, 2).slice(0, 3500)); } catch {}
 
-    // вытаскиваем поля из разных возможных мест
-    const adv = {
-      id: ev?.payload?.ad?.id ?? ev?.ad_id,
-      title: ev?.payload?.ad?.title ?? ev?.payload?.title ?? ev?.context?.value?.title ?? ev?.ad_title ?? "Без названия",
-      url: ev?.payload?.ad?.url || (ev?.payload?.ad?.id ? `https://avito.ru/${ev.payload.ad.id}` : ""),
-      price: ev?.payload?.ad?.price_text || ev?.payload?.price_text || ""
-    };
+    // v3: основные поля лежат в payload.value
+    const v = ev?.payload?.value || {};
+    const text      = v?.content?.text || "(без текста)";
+    const chatId    = v?.chat_id || "";
+    const chatType  = v?.chat_type || ""; // u2i / и т.п.
+    const userId    = v?.user_id || "";   // получатель
+    const authorId  = v?.author_id || ""; // отправитель
+    const itemId    = v?.item_id || "";
+    const published = v?.published_at || null;
 
-    const me = {
-      id: ev?.payload?.account?.id,
-      name: ev?.payload?.account?.name || "",
-      url: ev?.payload?.account?.url || "",
-      phone: ev?.payload?.account?.phone || ""
-    };
+    // имена в этом событии не приходят — используем понятные подписи
+    const myName    = "";            // хочешь — впиши своё имя статически
+    const userName  = "Собеседник";
 
-    const user = {
-      id: ev?.payload?.user?.id ?? ev?.user_id ?? ev?.user?.id,
-      name: ev?.payload?.user?.name || ev?.user?.name || "Собеседник",
-      url: ev?.payload?.user?.url || ""
-    };
-
-    const chat = {
-      id: ev?.payload?.chat_id ?? ev?.payload?.chat?.id ?? ev?.chat_id ?? ev?.chat?.id ?? ""
-    };
-
-    const text =
-      ev?.payload?.message?.text ||
-      ev?.message?.text ||
-      ev?.text ||
-      "(без текста)";
-
-    // формируем карточку в твоём стиле
+    // карточка в твоём стиле
     const lines = [];
-    lines.push(`${user.name}: ${text}`);
+    lines.push(`${userName}: ${text}`);
     lines.push("");
     lines.push("ИСТОРИЯ");
-    const now = tsRu();
-    lines.push(`${now} ${me.name}: `);
-    lines.push(`${now} ${user.name}: ${text}`);
+    const ts = tsRuFromISO(published);
+    lines.push(`${ts} ${myName}: `);
+    lines.push(`${ts} ${userName}: ${text}`);
     lines.push("");
-    const pricePart = adv.price ? ` (${adv.price})` : "";
-    const urlPart = adv.url ? ` (${adv.url})` : "";
-    lines.push(`${adv.title}${pricePart}${urlPart}  [#adv${adv.id || ""}]`);
-    const accIdTag = me.id ? ` [#acc${me.id}]` : "";
-    const usrIdTag = user.id ? ` [#user${user.id}]` : "";
-    lines.push(`Аккаунт: ${me.name} ${me.phone || ""}${accIdTag}`);
-    const userUrlPart = user.url ? ` (${user.url})` : "";
-    lines.push(`Собеседник: ${user.name}${userUrlPart}${usrIdTag}`);
-    if (ev?.payload?.ad?.location) lines.push(`Локация: ${ev.payload.ad.location}`);
+    const advTitle = itemId ? `Объявление #${itemId}` : "Без названия";
+    const advUrl   = itemId ? `https://avito.ru/${itemId}` : "";
+    const urlPart  = advUrl ? ` (${advUrl})` : "";
+    lines.push(`${advTitle}${urlPart}  [#adv${itemId || ""}]`);
+    if (myName) lines.push(`Аккаунт: ${myName}`);
+    lines.push(`Собеседник: ${userName} [#user${userId || ""}]`);
     lines.push("");
-    lines.push(String(chat.id || "нет chat_id"));
+    lines.push(`${chatType ? chatType + ":" : ""}${chatId || "нет chat_id"}`);
 
     await tg(lines.join("\n"));
 
-    // ===== автоответ в чат Авито (можно отредактировать текст) =====
+    // ===== автоответ в чат Авито =====
     const autoReply = [
       "Привет! Спасибо за обращение 👋",
       "Отвечу в течение 10–30 минут. Если срочно — напишите в Telegram: @your_username.",
       "Когда удобно созвониться?"
     ].join("\n");
 
-    if (chat.id) {
+    if (chatId) {
       try {
         const access = await getAvitoAccessToken();
-        const payload = { chat_id: chat.id, user_id: user.id, message: { text: autoReply } };
+        const payload = { chat_id: chatId, user_id: userId, message: { text: autoReply } };
         const sendCandidates = [
           "https://api.avito.ru/messenger/v3/messages",
           "https://api.avito.ru/messenger/v2/messages",
@@ -207,5 +187,5 @@ app.post("/webhook/message", async (req, res) => {
   }
 });
 
-// ===== start =====
+// ========= start =========
 app.listen(PORT, () => console.log("Listening on", PORT));
