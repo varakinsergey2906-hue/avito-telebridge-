@@ -11,7 +11,7 @@ const {
   TELEGRAM_CHAT_ID,
   AVITO_CLIENT_ID,
   AVITO_CLIENT_SECRET,
-  AVITO_ACCOUNT_ID,        // <— ДОБАВЬ в Render: 296724426
+  AVITO_ACCOUNT_ID,        // добавь в Render: напр. 296724426
   DEBUG_RAW = "0",         // 1 — слать сырые JSON в Telegram
   FORCE_REPLY = "0"        // 1 — отвечать на КАЖДОЕ сообщение (для теста)
 } = process.env;
@@ -28,7 +28,7 @@ function seenOnce(id) {
   return false;
 }
 
-// ===== автоответ только 1 раз на чат / 12 часов =====
+// ===== автоответ 1 раз на чат / 12 часов =====
 const repliedChats = new Map(); // chat_id -> expiresAt
 const REPLY_TTL_MS = 12 * 60 * 60 * 1000;
 function shouldAutoReply(chatId) {
@@ -69,7 +69,7 @@ async function getAvitoAccessToken() {
   return j.access_token;
 }
 
-// бэкап на случай, если AVITO_ACCOUNT_ID не задан
+// если AVITO_ACCOUNT_ID не задан — попробуем достать его сами
 let cachedAccountId = AVITO_ACCOUNT_ID || null;
 async function ensureAccountId(token) {
   if (cachedAccountId) return cachedAccountId;
@@ -90,7 +90,7 @@ app.get("/ping", async (req, res) => {
   catch { res.status(500).send("error"); }
 });
 
-// ===== регистрация вебхука кнопкой (оставим на месте) =====
+// ===== регистрация вебхука кнопкой (оставим) =====
 app.get("/setup/register", async (req, res) => {
   try {
     const access = await getAvitoAccessToken();
@@ -161,7 +161,7 @@ app.post("/webhook/message", async (req, res) => {
     lines.push(`${chatType ? chatType + ":" : ""}${chatId || "нет chat_id"}`);
     await tg(lines.join("\n"));
 
-    // ===== автоответ =====
+    // ===== автоответ (v3, перебор форматов на правильной базе) =====
     const force = FORCE_REPLY === "1";
     if (!chatId) {
       await tg("↩️ Автоответ пропущен: нет chat_id в событии");
@@ -172,24 +172,44 @@ app.post("/webhook/message", async (req, res) => {
         const access = await getAvitoAccessToken();
         const accountId = await ensureAccountId(access);
 
-        const url = `https://api.avito.ru/messenger/v3/accounts/${encodeURIComponent(accountId)}/chats/${encodeURIComponent(chatId)}/messages`;
-        const body = {
-          message: { content: { text:
-            "Здравствуйте!\nСпасибо за интерес к моим занятиям по химии. Чтобы быстрее обсудить детали и подобрать удобное время для бесплатного пробного урока, напишите мне в Telegram @varakin_s или оставьте ваш номер WhatsApp — я свяжусь с вами сразу как смогу.\n\nПожалуйста, укажите вашу цель: подготовка к ЕГЭ/ОГЭ, помощь с учебой, олимпиадная химия или что-то другое. Жду вашего сообщения!"
-          } }
-        };
+        const base = `https://api.avito.ru/messenger/v3/accounts/${encodeURIComponent(accountId)}/chats/${encodeURIComponent(chatId)}`;
 
-        const r = await fetch(url, {
-          method: "POST",
-          headers: {
-            "Authorization": `Bearer ${access}`,
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify(body)
-        });
+        const urls = [
+          `${base}/messages`,
+          `${base}/messages/text`,
+          `${base}/messages:send`
+        ];
 
-        const t = await r.text();
-        await tg(`↩️ Автоответ: ${r.status}\n${t.slice(0,400)}`);
+        const txt =
+          "Здравствуйте!\n" +
+          "Спасибо за интерес к моим занятиям по химии. Чтобы быстрее обсудить детали и подобрать удобное время для бесплатного пробного урока, напишите мне в Telegram @varakin_s или оставьте ваш номер WhatsApp — я свяжусь с вами сразу как смогу.\n\n" +
+          "Пожалуйста, укажите вашу цель: подготовка к ЕГЭ/ОГЭ, помощь с учебой, олимпиадная химия или что-то другое. Жду вашего сообщения!";
+
+        const bodies = [
+          { type: "text", content: { text: txt } },                   // A: type+content
+          { message: { content: { text: txt } } },                    // B: message.content
+          { text: txt }                                               // C: просто text
+        ];
+
+        let sent = false, debug = [];
+        outer: for (const url of urls) {
+          for (const body of bodies) {
+            const r = await fetch(url, {
+              method: "POST",
+              headers: {
+                "Authorization": `Bearer ${access}`,
+                "Content-Type": "application/json",
+                "Accept": "application/json"
+              },
+              body: JSON.stringify(body)
+            });
+            const t = await r.text();
+            debug.push(`${r.status} — ${url}\n${t.slice(0,300)}\nBODY=${JSON.stringify(body)}`);
+            if ([200,201,202,204].includes(r.status)) { sent = true; break outer; }
+          }
+        }
+
+        await tg(`↩️ Автоответ: ${sent ? "успех" : "не отправлен"}\n` + debug.join("\n\n"));
       } catch (e) {
         await tg(`↩️ Автоответ ошибка: ${e.message}`);
       }
