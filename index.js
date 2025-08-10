@@ -4,19 +4,20 @@ import fetch from "node-fetch";
 const app = express();
 app.use(express.json());
 
-// ===== ENV (фиксированные имена) =====
+// ===== ENV =====
 const {
   PORT = 8080,
   TELEGRAM_BOT_TOKEN,
   TELEGRAM_CHAT_ID,
   AVITO_CLIENT_ID,
   AVITO_CLIENT_SECRET,
-  DEBUG_RAW = "0",          // 1 = присылать сырые JSON в Telegram
-  FORCE_REPLY = "0"         // 1 = отвечать на каждое сообщение
+  AVITO_ACCOUNT_ID,        // <— ДОБАВЬ в Render: 296724426
+  DEBUG_RAW = "0",         // 1 — слать сырые JSON в Telegram
+  FORCE_REPLY = "0"        // 1 — отвечать на КАЖДОЕ сообщение (для теста)
 } = process.env;
 
-// ===== анти-дубли сообщений (по message.id) =====
-const seen = new Map(); // id -> expiresAt
+// ===== анти-дубли сообщений =====
+const seen = new Map(); // messageId -> expiresAt
 const MSG_TTL_MS = 10 * 60 * 1000;
 function seenOnce(id) {
   const now = Date.now();
@@ -68,6 +69,20 @@ async function getAvitoAccessToken() {
   return j.access_token;
 }
 
+// бэкап на случай, если AVITO_ACCOUNT_ID не задан
+let cachedAccountId = AVITO_ACCOUNT_ID || null;
+async function ensureAccountId(token) {
+  if (cachedAccountId) return cachedAccountId;
+  const r = await fetch("https://api.avito.ru/core/v1/accounts/self", {
+    headers: { Authorization: `Bearer ${token}` }
+  });
+  if (!r.ok) throw new Error(`Get self failed: ${r.status}`);
+  const j = await r.json();
+  cachedAccountId = String(j?.id || "");
+  if (!cachedAccountId) throw new Error("No account_id");
+  return cachedAccountId;
+}
+
 // ===== health / ping =====
 app.get("/", (_, res) => res.send("ok"));
 app.get("/ping", async (req, res) => {
@@ -75,7 +90,7 @@ app.get("/ping", async (req, res) => {
   catch { res.status(500).send("error"); }
 });
 
-// ===== регистрация вебхука кнопкой =====
+// ===== регистрация вебхука кнопкой (оставим на месте) =====
 app.get("/setup/register", async (req, res) => {
   try {
     const access = await getAvitoAccessToken();
@@ -114,7 +129,7 @@ app.post("/webhook/message", async (req, res) => {
     const ev = req.body || {};
     const v  = ev?.payload?.value || {}; // v3
 
-    // анти-дубль по id
+    // анти-дубль по id сообщения
     const messageId = v?.id || ev?.id;
     if (seenOnce(messageId)) return res.send("dup");
 
@@ -129,7 +144,7 @@ app.post("/webhook/message", async (req, res) => {
     const itemId    = v?.item_id || "";
     const published = v?.published_at || null;
 
-    // карточка
+    // карточка в ТГ
     const lines = [];
     const ts = tsRuFromISO(published);
     lines.push(`Собеседник: ${text}`);
@@ -155,30 +170,26 @@ app.post("/webhook/message", async (req, res) => {
     } else {
       try {
         const access = await getAvitoAccessToken();
-        const urls = [
-          "https://api.avito.ru/messenger/v3/messages",
-          "https://api.avito.ru/messenger/v3/messages/send",
-          `https://api.avito.ru/messenger/v3/chats/${encodeURIComponent(chatId)}/messages`
-        ];
-        const bodies = [
-          { chat_id: chatId, user_id: userId, type: "text", message: { content: { text: "Привет! Спасибо за обращение 👋 Отвечу в течение 10–30 минут." } } },
-          { chat_id: chatId, user_id: userId, message: { content: { text: "Привет! Спасибо за обращение 👋 Отвечу в течение 10–30 минут." } } },
-          { chat_id: chatId, user_id: userId, message: { text: "Привет! Спасибо за обращение 👋 Отвечу в течение 10–30 минут." } }
-        ];
-        let sent = false, debug = [];
-        outer: for (const url of urls) {
-          for (const body of bodies) {
-            const r = await fetch(url, {
-              method: "POST",
-              headers: { "Authorization": `Bearer ${access}`, "Content-Type": "application/json" },
-              body: JSON.stringify(body)
-            });
-            const t = await r.text();
-            debug.push(`${r.status} — ${url}\n${t.slice(0,200)}\nBODY=${JSON.stringify(body)}`);
-            if ([200,201,202,204].includes(r.status)) { sent = true; break outer; }
-          }
-        }
-        await tg(`↩️ Автоответ: ${sent ? "успех" : "не отправлен"}\n` + debug.join("\n\n"));
+        const accountId = await ensureAccountId(access);
+
+        const url = `https://api.avito.ru/messenger/v3/accounts/${encodeURIComponent(accountId)}/chats/${encodeURIComponent(chatId)}/messages`;
+        const body = {
+          message: { content: { text:
+            "Здравствуйте!\nСпасибо за интерес к моим занятиям по химии. Чтобы быстрее обсудить детали и подобрать удобное время для бесплатного пробного урока, напишите мне в Telegram @varakin_s или оставьте ваш номер WhatsApp — я свяжусь с вами сразу как смогу.\n\nПожалуйста, укажите вашу цель: подготовка к ЕГЭ/ОГЭ, помощь с учебой, олимпиадная химия или что-то другое. Жду вашего сообщения!"
+          } }
+        };
+
+        const r = await fetch(url, {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${access}`,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify(body)
+        });
+
+        const t = await r.text();
+        await tg(`↩️ Автоответ: ${r.status}\n${t.slice(0,400)}`);
       } catch (e) {
         await tg(`↩️ Автоответ ошибка: ${e.message}`);
       }
