@@ -1,97 +1,84 @@
 import express from "express";
-import axios from "axios";
-import bodyParser from "body-parser";
+import fetch from "node-fetch";
 
 const app = express();
-app.use(bodyParser.json());
+app.use(express.json());
 
-const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN; // токен бота
-const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID; // твой id чата
-const AVITO_TOKEN = process.env.AVITO_TOKEN; // токен Avito API
+// ==== ENV (оставляем как раньше) ====
+const {
+  PORT = 8080,
+  TELEGRAM_BOT_TOKEN,
+  TELEGRAM_CHAT_ID,
+  DEBUG_RAW = "0" // 1 — присылать сырые JSON для отладки
+} = process.env;
 
-// Запоминаем чаты, куда уже отправили автоответ
-const repliedChats = new Set();
-
-// === Вебхук Avito ===
-app.post("/webhook", async (req, res) => {
-    const rawData = JSON.stringify(req.body, null, 2);
-    console.log("RAW webhook:", rawData);
-
-    if (req.body?.payload?.type === "message") {
-        const msg = req.body.payload.value;
-        const chatId = msg.chat_id;
-        const userId = msg.user_id;
-        const text = msg.content?.text || "(без текста)";
-        const itemId = msg.item_id;
-
-        // Формируем красивое сообщение в Telegram
-        const tgMessage = `📢 Новое сообщение с Avito\n` +
-            `Собеседник: ${text}\n\n` +
-            `Объявление #${itemId} (https://avito.ru/${itemId})\n` +
-            `chat_id: ${chatId}\nuser_id: ${userId}`;
-
-        await sendTelegram(tgMessage);
-
-        // Автоответ только на первое сообщение в чате
-        if (!repliedChats.has(chatId)) {
-            repliedChats.add(chatId);
-            await sendAvitoMessage(chatId, userId,
-                "Здравствуйте! Спасибо за интерес к моим занятиям по химии. Чтобы быстрее обсудить детали и подобрать удобное время для бесплатного пробного урока, напишите мне в Telegram @varakin_s или оставьте ваш номер WhatsApp — я свяжусь с вами сразу как смогу.\n\nПожалуйста, укажите вашу цель: подготовка к ЕГЭ/ОГЭ, помощь с учебой, олимпиадная химия или что-то другое. Жду вашего сообщения!"
-            );
-        }
-    }
-
-    res.sendStatus(200);
-});
-
-// === Тестовый эндпоинт для ручной отправки ===
-app.get("/debug/send", async (req, res) => {
-    const chatId = req.query.chat_id;
-    const userId = req.query.user_id;
-    if (!chatId || !userId) {
-        return res.send("Нужно передать chat_id и user_id в query params");
-    }
-
-    const result = await sendAvitoMessage(chatId, userId, "Тестовое сообщение от бота 🚀");
-    res.send(result);
-});
-
-// === Функция отправки в Telegram ===
-async function sendTelegram(text) {
-    try {
-        await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
-            chat_id: TELEGRAM_CHAT_ID,
-            text
-        });
-    } catch (err) {
-        console.error("Ошибка отправки в Telegram:", err.response?.data || err.message);
-    }
+// ==== отправка в Telegram ====
+async function tg(text) {
+  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
+  await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text })
+  });
 }
 
-// === Функция отправки в Avito ===
-async function sendAvitoMessage(chatId, userId, text) {
-    try {
-        const resp = await axios.post(
-            `https://api.avito.ru/messenger/v1/accounts/${userId}/chats/${chatId}/messages`,
-            {
-                type: "text",
-                message: {
-                    content: { text }
-                }
-            },
-            {
-                headers: {
-                    Authorization: `Bearer ${AVITO_TOKEN}`,
-                    "Content-Type": "application/json"
-                }
-            }
-        );
-        return resp.data;
-    } catch (err) {
-        console.error("Ошибка отправки в Avito:", err.response?.data || err.message);
-        return err.response?.data || err.message;
-    }
+function tsRuFromISO(iso) {
+  const d = iso ? new Date(iso) : new Date();
+  const pad = n => String(n).padStart(2, "0");
+  return `${pad(d.getDate())}.${pad(d.getMonth()+1)} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+// ==== health / ping ====
+app.get("/", (_, res) => res.send("ok"));
+app.get("/ping", async (req, res) => {
+  try { await tg(String(req.query.text || "Пинг ✅")); res.send("sent"); }
+  catch { res.status(500).send("error"); }
+});
+
+// ==== обработчик (общий для /webhook и /webhook/message) ====
+async function handleWebhook(req, res) {
+  try {
+    const ev = req.body || {};
+    if (DEBUG_RAW === "1") {
+      try { await tg("📦 RAW:\n" + JSON.stringify(ev, null, 2).slice(0, 3500)); } catch {}
+    }
+
+    // v3-схема Avito → payload.value.*
+    const v = ev?.payload?.value || {};
+    const text      = v?.content?.text || "(без текста)";
+    const chatId    = v?.chat_id || "";
+    const chatType  = v?.chat_type || "";
+    const userId    = v?.user_id || "";
+    const itemId    = v?.item_id || "";
+    const published = v?.published_at || null;
+
+    // карточка в ТГ (как мы делали раньше)
+    const lines = [];
+    const ts = tsRuFromISO(published);
+    lines.push(`Собеседник: ${text}`);
+    lines.push("");
+    lines.push("ИСТОРИЯ");
+    lines.push(`${ts} Я: `);
+    lines.push(`${ts} Собеседник: ${text}`);
+    lines.push("");
+    const advTitle = itemId ? `Объявление #${itemId}` : "Без названия";
+    const advUrl   = itemId ? `https://avito.ru/${itemId}` : "";
+    lines.push(`${advTitle}${advUrl ? ` (${advUrl})` : ""}  [#adv${itemId || ""}]`);
+    lines.push(`Собеседник: [#user${userId || ""}]`);
+    lines.push("");
+    lines.push(`${chatType ? chatType + ":" : ""}${chatId || "нет chat_id"}`);
+
+    await tg(lines.join("\n"));
+    res.send("ok");
+  } catch (e) {
+    await tg(`❗️Ошибка вебхука: ${e.message}`);
+    res.status(200).send("ok");
+  }
+}
+
+// Ловим оба пути — чтобы не промахнуться
+app.post("/webhook", handleWebhook);
+app.post("/webhook/message", handleWebhook);
+
+// ==== старт ====
+app.listen(PORT, () => console.log(`Listening on ${PORT}`));
