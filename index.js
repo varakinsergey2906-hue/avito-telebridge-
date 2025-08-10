@@ -34,7 +34,7 @@ app.get("/ping", async (req, res) => {
   }
 });
 
-app.post("/webhook/avito", async (req, res) => {
+app.post("/webhook/message", async (req, res) => {
   // Простая проверка подписи (по желанию): передавай тот же секрет в заголовке X-Webhook-Signature
   if (WEBHOOK_SHARED_SECRET && req.headers["x-webhook-signature"] !== WEBHOOK_SHARED_SECRET) {
     return res.status(401).send("bad signature");
