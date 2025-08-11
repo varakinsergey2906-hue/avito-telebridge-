@@ -92,42 +92,43 @@ app.get("/ping", async (req, res) => {
 
 // ===== автоответ: отправка (v3, корректный маршрут) =====
 async function sendAutoReply({ chatId, text }) {
-  const access = await getAvitoAccessToken();
-  const accountId = await ensureAccountId(access);
+  // 1) получить токен
+  const body = new URLSearchParams({
+    grant_type: "client_credentials",
+    client_id: AVITO_CLIENT_ID,
+    client_secret: AVITO_CLIENT_SECRET
+  });
+  const tokRes = await fetch("https://api.avito.ru/token", { method: "POST", body });
+  if (!tokRes.ok) throw new Error(`token ${tokRes.status}`);
+  const tok = await tokRes.json();
+  const access = tok.access_token;
 
-  const base = `https://api.avito.ru/messenger/v3/accounts/${encodeURIComponent(accountId)}/chats/${encodeURIComponent(chatId)}`;
+  // 2) твой user_id (номер профиля). Можно жёстко из ENV:
+  const accountId = AVITO_ACCOUNT_ID || "296724426"; // подстрахуем
 
-  const urls = [
-    `${base}/messages`,
-    `${base}/messages/text`,
-    `${base}/messages:send`
-  ];
+  // 3) правильный v1 URL + правильное тело
+  const url = `https://api.avito.ru/messenger/v1/accounts/${encodeURIComponent(accountId)}/chats/${encodeURIComponent(chatId)}/messages`;
+  const payload = {
+    type: "text",
+    message: { text }
+  };
 
-  const bodies = [
-    { type: "text", content: { text } },            // A
-    { message: { content: { text } } },             // B
-    { text }                                        // C
-  ];
+  const r = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${access}`,
+      "Content-Type": "application/json",
+      "Accept": "application/json"
+    },
+    body: JSON.stringify(payload)
+  });
 
-  let sent = false, log = [];
-  outer: for (const url of urls) {
-    for (const body of bodies) {
-      const r = await fetch(url, {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${access}`,
-          "Content-Type": "application/json",
-          "Accept": "application/json"
-        },
-        body: JSON.stringify(body)
-      });
-      const t = await r.text();
-      log.push(`${r.status} — ${url}\n${t.slice(0,300)}\nBODY=${JSON.stringify(body)}`);
-      if ([200,201,202,204].includes(r.status)) { sent = true; break outer; }
-    }
+  const t = await r.text();
+  await tg(`↩️ Автоответ: ${r.status}\n${t.slice(0,400)}\nURL=${url}\nBODY=${JSON.stringify(payload)}`);
+  if (![200,201,202,204].includes(r.status)) {
+    throw new Error(`send fail ${r.status}`);
   }
-  await tg(`↩️ Автоответ: ${sent ? "успех" : "не отправлен"}\n` + log.join("\n\n"));
-  return sent;
+  return true;
 }
 
 // ===== единый обработчик вебхука =====
